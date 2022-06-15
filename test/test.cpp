@@ -1,11 +1,23 @@
 #include <iostream>
 #include <lighten/future.hpp>
+#include <lighten/io/buffer.hpp>
+#include <lighten/inet/address.hpp>
+#include <lighten/inet/tcp.hpp>
+#include <lighten/aio.hpp>
+#include <lighten/queue.hpp>
 
 namespace ltn = lighten;
 
+struct s {
+  int i;
+};
 
 void future_test()
 {
+  ltn::queue<struct s> q;
+
+  int i = ((s &)q.front()).i;
+
   ltn::packaged_task<int(const char *, size_t)> proc([](const char *data, size_t size){
     return (int)size;
   });

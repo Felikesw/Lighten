@@ -62,13 +62,15 @@ class ref_ptr_base {
   };
 
 
-  inline bool atomic_compare_exchange_ptr(uintptr_t &expected, uintptr_t desired) const {
 #ifdef USE_GCC_ATOMIC_BUILTINS
+  inline bool atomic_compare_exchange_ptr(uintptr_t &expected, uintptr_t desired) const {
     return __atomic_compare_exchange_n(m_ptr_p, &expected, desired, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
- #else
-    return m_ptr_p->compare_exchange_weak(expected, desired, std::memory_order_release, std::memory_order_relaxed);
-#endif
   }
+ #else
+  inline bool atomic_compare_exchange_ptr(uintptr_t &expected, uintptr_t desired) const {
+    return m_ptr_p->compare_exchange_weak(expected, desired, std::memory_order_release, std::memory_order_relaxed);
+  }
+#endif
 
   static inline void YIELD() { usleep(1); }
   static const uintptr_t REF_PTR_LOCK  = 1;
@@ -107,6 +109,7 @@ class ref_ptr_base {
     uintptr_t p = lock_ptr();
     
     if(!atomic_compare_exchange_ptr(p, reinterpret_cast<uintptr_t>(ptr))){
+      //ptr->put_ref();
       throw ref_ptr_lock_error(); 
     }
     p = REF_PTR_CLR_LOCK(p);
@@ -133,36 +136,9 @@ class ref_ptr_base {
     return reinterpret_cast<referenceable*>(REF_PTR_CLR_LOCK(p));
   }
 
+
   referenceable *get_ptr() const {
     return reinterpret_cast<referenceable*>((*m_ptr_p)&REF_PTR_MASK);
-  }
-
-  referenceable *get_ptr_ref() const {
-    uintptr_t p = lock_ptr();
-    referenceable *ret = reinterpret_cast<referenceable*>(REF_PTR_CLR_LOCK(p));
-
-    if(ret)ret->get_ref();
-    unlock_ptr(p);
-
-    return ret;
-  }
-
-  bool compare_exchange(referenceable *expected, ref_ptr_base &&newptr) {
-    referenceable *nptr = newptr.move_ptr();
-    uintptr_t exp = reinterpret_cast<uintptr_t>(expected);
-
-    if(REF_PTR_IS_LOCKED(exp)){
-      throw ref_ptr_lock_error(); 
-    }
-    bool res = atomic_compare_exchange_ptr(exp, reinterpret_cast<uintptr_t>(nptr));
-    if(res) {
-      if(expected)expected->put_ref();
-    }
-    else {
-      if(nptr)nptr->put_ref();
-    }
-
-    return res;
   }
 
   ref_ptr_base(): m_ptr_p(new std::decay<decltype(*m_ptr_p)>::type(0)) 
@@ -227,6 +203,8 @@ class ref<enable_if_referenceable<T>>: public T {
   ~ref() {}
 };
 
+//class state_base;
+
 
 template<class T>
 class ref_ptr: protected internals::ref_ptr_base {
@@ -237,6 +215,7 @@ class ref_ptr: protected internals::ref_ptr_base {
   friend class ref_ptr;
 
   friend T;
+  //friend class state_base;
 
   protected:
   ref_ptr(T *p) { 
@@ -245,15 +224,6 @@ class ref_ptr: protected internals::ref_ptr_base {
 
   ref_ptr(ref<T> *p) {
     set_ptr(p);
-  }
-
-  T *get_ref() const {
-    if constexpr(is_referenceable_v<T>) {
-      return dynamic_cast<T *>(get_ptr_ref());
-    }
-    else {
-      return dynamic_cast<ref<T> *>(get_ptr_ref());
-    }
   }
 
   public:
@@ -268,22 +238,55 @@ class ref_ptr: protected internals::ref_ptr_base {
   ref_ptr(nullptr_t const) noexcept : ref_ptr() { } 
 
   ref_ptr(const ref_ptr &s) {
-    replace_ptr(s.get_ptr_ref());
+    uintptr_t p = s.lock_ptr();
+    
+    /*
+    if constexpr(is_referenceable_v<T>) {
+      T *ptr = reinterpret_cast<T *>(REF_PTR_CLR_LOCK(p));
+      if(ptr) {
+        ptr->get_ref();
+      }
+    }
+    else {
+      ref<T> *ptr = reinterpret_cast<ref<T> *>(REF_PTR_CLR_LOCK(p));
+      if(ptr) {
+        ptr->get_ref();
+      }
+    }
+    */
+    set_ptr(s.get_ptr());
+    s.unlock_ptr(p);
+    //*m_ptr_p = REF_PTR_CLR_LOCK(p);
   }
 
   ref_ptr(ref_ptr &&s) {
-    replace_ptr(s.move_ptr());
+    //*m_ptr_p = s.move_ptr();
+    set_ptr(s.move_ptr());
   }
 
   template<class C>
+  //ref_ptr(std::enable_if<std::is_convertible_v<C, T>/*std::is_base_of_v<T, C>*/, const ref_ptr<C> &> s) {
   ref_ptr(const ref_ptr<C> &s) {
+    uintptr_t p = s.lock_ptr();
+    T *tp = reinterpret_cast<C*>(s.get_ptr()); 
+
     if constexpr(is_referenceable_v<T>) {
-      T *ptr = s.get_ref();
-      replace_ptr(ptr);
+      T *ptr = reinterpret_cast<T *>(REF_PTR_CLR_LOCK(p));
+      if(ptr) {
+        ptr->get_ref();
+      }
+
+      s.unlock_ptr(p);
+      replace_ptr(reinterpret_cast<uintptr_t>(ptr));
     }
     else {
-      ref<T> *ptr = s.get_ref();
-      replace_ptr(ptr);
+      ref<T> *ptr = reinterpret_cast<ref<T> *>(REF_PTR_CLR_LOCK(p));
+      if(ptr) {
+        ptr->get_ref();
+      }
+
+      s.unlock_ptr(p);
+      replace_ptr(reinterpret_cast<uintptr_t>(ptr));
     }
   }
 
@@ -291,36 +294,116 @@ class ref_ptr: protected internals::ref_ptr_base {
     replace_ptr(0);
   }
 
-  bool compare_exchange(T *expected, ref_ptr<T> &&newptr) {
-    return ref_ptr_base::compare_exchange(expected, std::move(newptr));
-  }
-
   operator bool() const {
-    return (get_ptr() != nullptr);
+    return (get_ptr() != 0);
   }
 
-  bool operator == (const ref_ptr &s) const {
+  /*
+  bool operator== (const T *ptr) const {
+    const T *p = reinterpret_cast<ref<T> *>(get_ptr());
+    return (p == ptr);
+  }
+  */
+
+  bool operator == (const ref_ptr<T> &s) const {
     return (get_ptr() == s.get_ptr());
   }
 
   T& operator*() const {
     if constexpr(is_referenceable_v<T>) {
-      return *dynamic_cast<T *>(get_ptr());
+      return *reinterpret_cast<T *>(get_ptr());
     }
     else {
-      return *dynamic_cast<ref<T> *>(get_ptr());
+      return *reinterpret_cast<ref<T> *>(get_ptr());
     }
   }
 
   T* operator->() const{
     if constexpr(is_referenceable_v<T>) {
-      return dynamic_cast<T *>(get_ptr());
+      return reinterpret_cast<T *>(get_ptr());
     }
     else {
-      return dynamic_cast<ref<T> *>(get_ptr());
+      return reinterpret_cast<ref<T> *>(get_ptr());
     }
   }
 };
+
+/*
+template<class T>
+class ref_ptr<enable_if_referenceable<T>>: protected internals::ref_ptr_base {
+  template<typename U, typename ...V>
+  friend ref_ptr<U> ref_new(V&&...args);
+  friend T;
+
+  //friend class state_base;
+
+  protected:
+  ref_ptr(T*p) { 
+    set_ptr(reinterpret_cast<uintptr_t>(p));
+  }
+
+  public:
+  typedef T type;
+
+  ~ref_ptr() {
+    replace_ptr(0);
+  }
+
+  ref_ptr() noexcept {}
+
+  ref_ptr(nullptr_t const) noexcept : ref_ptr() { } 
+
+  ref_ptr(const ref_ptr &s) {
+    uintptr_t p = s.lock_ptr();
+    T *ptr = reinterpret_cast<T *>(REF_PTR_CLR_LOCK(p));
+    if(ptr) {
+      ptr->get_ref();
+    }
+    s.unlock_ptr(p);
+    *m_ptr_p = REF_PTR_CLR_LOCK(p);
+  }
+
+  ref_ptr(ref_ptr &&s) {
+    *m_ptr_p = s.move_ptr();
+  }
+
+  template<class C>
+  ref_ptr(std::enable_if<std::is_base_of_v<T, C>, const ref_ptr<C> &> s) {
+    uintptr_t p = s.lock_ptr();
+    T *ptr = reinterpret_cast<T *>(REF_PTR_CLR_LOCK(p));
+    if(ptr) {
+      ptr->get_ref();
+    }
+    s.unlock_ptr(p);
+    replace_ptr(reinterpret_cast<uintptr_t>(ptr));
+  }
+
+  void reset() {
+    replace_ptr(0);
+  }
+
+  operator bool() const {
+    return (get_ptr() != 0);
+  }
+
+  bool operator== (const T *ptr) const {
+    const T *p = reinterpret_cast<T *>(get_ptr());
+    return (p == ptr);
+  }
+
+  bool operator == (const ref_ptr<T> &s) const {
+    return (get_ptr() == s.get_ptr());
+  }
+
+  T& operator*() const {
+    return *reinterpret_cast<T *>(get_ptr());
+  }
+
+  T* operator->() const{
+    return reinterpret_cast<T *>(get_ptr());
+  }
+};
+*/
 
 
 template<typename C>
